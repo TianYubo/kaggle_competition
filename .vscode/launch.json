@@ -11,6 +11,16 @@
             "program": "${workspaceFolder}/code/template.py",
             "console": "integratedTerminal",
             "justMyCode": false,
-        }
+            "cwd": "${workspaceFolder}",
+        },
+        {
+            "name": "Baseline",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/baseline.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+        },
     ]
 }

@@ -1,17 +1,52 @@
 import os
-import joblib 
-
+import joblib
+import gc
 import pandas as pd
 import polars as pl
 import lightgbm as lgb
 import xgboost as xgb
 import catboost as cbt
 import numpy as np 
+from typing import Union
 
+from tqdm import tqdm
 from joblib import Parallel, delayed
+# from data.kaggle_evaluation import jane_street_inference_server
 
-# import kaggle_evaluation.jane_street_inference_server
+# ---------------------- Functions ----------------------
+# Custom R2 metric for XGBoost
+def r2_xgb(y_true, y_pred, sample_weight):
+    r2 = 1 - np.average((y_pred - y_true) ** 2, weights=sample_weight) / (np.average((y_true) ** 2, weights=sample_weight) + 1e-38)
+    return -r2
 
+# Custom R2 metric for LightGBM
+def r2_lgb(y_true, y_pred, sample_weight):
+    r2 = 1 - np.average((y_pred - y_true) ** 2, weights=sample_weight) / (np.average((y_true) ** 2, weights=sample_weight) + 1e-38)
+    return 'r2', r2, True
+
+# Custom R2 metric for CatBoost
+class r2_cbt(object):
+    def get_final_error(self, error, weight):
+        return 1 - error / (weight + 1e-38)
+
+    def is_max_optimal(self):
+        return True
+
+    def evaluate(self, approxes, target, weight):
+        assert len(approxes) == 1
+        assert len(target) == len(approxes[0])
+
+        approx = approxes[0]
+        error_sum = 0.0
+        weight_sum = 0.0
+
+        for i in range(len(approx)):
+            w = 1.0 if weight is None else weight[i]
+            weight_sum += w * (target[i] ** 2)
+            error_sum += w * ((approx[i] - target[i]) ** 2)
+
+        return error_sum, weight_sum
+    
 def reduce_mem_usage(df, float16_as32=True):
     #memory_usage()是df每列的内存使用量,sum是对它们求和, B->KB->MB
     start_mem = df.memory_usage().sum() / 1024**2
@@ -52,6 +87,141 @@ def reduce_mem_usage(df, float16_as32=True):
     print('Memory usage after optimization is: {:.2f} MB'.format(end_mem))
     #相比一开始的内存减少了百分之多少
     print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
-
     return df
+
+# Function to train a model or load a pre-trained model
+def train(model_dict, model_name='lgb', nfold_idx=0, model_ckpt=None, train_mode=False):
+    if train_mode:
+        # Select dates for training based on the fold number
+        selected_dates = [date for ii, date in enumerate(train_dates) if ii % N_fold != i]
+        
+        # Get the model from the dictionary
+        model = model_dict[model_name]
+        
+        # Extract features, target, and weights for the selected training dates
+        X_train = df[feature_names].loc[df['date_id'].isin(selected_dates)]
+        y_train = df['responder_6'].loc[df['date_id'].isin(selected_dates)]
+        w_train = df['weight'].loc[df['date_id'].isin(selected_dates)]
+
+        # Train the model based on the type (LightGBM, XGBoost, or CatBoost)
+        if model_name == 'lgb':
+            # Train LightGBM model with early stopping and evaluation logging
+            model.fit(X_train, y_train, w_train,  
+                      eval_metric=[r2_lgb],
+                      eval_set=[(X_valid, y_valid, w_valid)], 
+                      callbacks=[
+                          lgb.early_stopping(100), 
+                          lgb.log_evaluation(10)
+                      ])
+            
+        elif model_name == 'cbt':
+            # Prepare evaluation set for CatBoost
+            evalset = cbt.Pool(X_valid, y_valid, weight=w_valid)
+            
+            # Train CatBoost model with early stopping and verbose logging
+            model.fit(X_train, y_train, sample_weight=w_train, 
+                      eval_set=[evalset], 
+                      verbose=10, 
+                      early_stopping_rounds=100)
+            
+        else:
+            # Train XGBoost model with early stopping and verbose logging
+            model.fit(X_train, y_train, sample_weight=w_train, 
+                      eval_set=[(X_valid, y_valid)], 
+                      sample_weight_eval_set=[w_valid], 
+                      verbose=10, 
+                      early_stopping_rounds=100)
+        # Append the trained model to the list
+        models.append(model)
+        # Save the trained model to a file
+        joblib.dump(model, f'./models/{model_name}_{i}.model')
+        
+        # Delete training data to free up memory
+        del X_train
+        del y_train
+        del w_train
+        
+        # Collect garbage to free up memory
+        gc.collect()
+        
+    else:
+        # If not in training mode, load the pre-trained model from the specified path
+        models.append(joblib.load(f'{model_ckpt}/{model_name}_{nfold_idx}.model'))
+    return 
+
+lags_ = None
+
+# Replace this function with your inference code.
+# You can return either a Pandas or Polars dataframe, though Polars is recommended.
+# Each batch of predictions (except the very first) must be returned within 10 minutes of the batch features being provided.
+def predict(test: pl.DataFrame, lags: Union[pl.DataFrame, None]) -> Union[pl.DataFrame, pd.DataFrame]:
+    """Make a prediction."""
+    # All the responders from the previous day are passed in at time_id == 0. We save them in a global variable for access at every time_id.
+    # Use them as extra features, if you like.
+    global lags_
+    if lags is not None:
+        lags_ = lags
+
+    predictions = test.select(
+        'row_id',
+        pl.lit(0.0).alias('responder_6'),
+    )
+    
+    feat = test[feature_names].to_numpy()
+    
+    pred = [model.predict(feat) for model in models]
+    pred = np.mean(pred, axis=0)
+    
+    predictions = predictions.with_columns(pl.Series('responder_6', pred.ravel()))
+
+    # The predict function must return a DataFrame
+    assert isinstance(predictions, pl.DataFrame | pd.DataFrame)
+    # with columns 'row_id', 'responer_6'
+    assert list(predictions.columns) == ['row_id', 'responder_6']
+    # and as many rows as the test data.
+    assert len(predictions) == len(test)
+
+    return predictions
+
+# ---------------------- Main ----------------------
+#! Parameters
+input_path = "~/kaggle/jane-street-project/data"
+TRAINING = True    # Flag to determine if the script is in training mode or not
+feature_names = [f"feature_{i:02d}" for i in range(79)]     # Define the feature names based on the number of features (79 in this case)
+num_valid_dates = 100   # Number of validation dates to use
+skip_dates = 500    # Number of dates to skip from the beginning of the dataset
+N_fold = 5  # Number of folds for cross-validation
+
+# Dictionary to store different models with their configurations
+model_dict = {
+    'lgb': lgb.LGBMRegressor(n_estimators=500, device='gpu', gpu_use_dp=True, objective='l2'),
+    'xgb': xgb.XGBRegressor(n_estimators=2000, learning_rate=0.1, max_depth=6, tree_method='hist', device="cuda", objective='reg:squarederror', eval_metric=r2_xgb, disable_default_eval_metric=True),
+    'cbt': cbt.CatBoostRegressor(iterations=1000, learning_rate=0.05, task_type='GPU', loss_function='RMSE', eval_metric=r2_cbt()),
+}
+
+if TRAINING:
+    # 加载并预处理数据
+    # df = pd.read_parquet(f'{input_path}/train.parquet/partition_id=1/part-0.parquet')
+    df = pd.read_parquet(f'{input_path}/train.parquet', filters=[('partition_id', '=', 4)])
+    df = reduce_mem_usage(df, False)
+    df = df[df['date_id'] >= skip_dates].reset_index(drop=True)
+    
+    # 划分训练集和验证集
+    print("----------- Start to Load Dataset! -----------")
+    dates = df['date_id'].unique()
+    valid_dates = dates[-num_valid_dates:]
+    train_dates = dates[:-num_valid_dates]
+    X_valid = df[feature_names].loc[df['date_id'].isin(valid_dates)]
+    y_valid = df['responder_6'].loc[df['date_id'].isin(valid_dates)]
+    w_valid = df['weight'].loc[df['date_id'].isin(valid_dates)]
+    print("----------- Dataset Loaded! -----------")
+
+models = []
+model_ckpt_path = "./jsbaselinezyz/versions/1"
+# Train models for each fold
+for i in tqdm(range(N_fold), desc="Training: ", total=N_fold):
+    train(model_dict, 'lgb', i, model_ckpt_path, TRAINING)
+    train(model_dict, 'xgb', i, model_ckpt_path, TRAINING)
+    train(model_dict, 'cbt', i, model_ckpt_path, TRAINING)
+    
 
