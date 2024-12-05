@@ -186,13 +186,13 @@ def predict(test: pl.DataFrame, lags: Union[pl.DataFrame, None]) -> Union[pl.Dat
 # ---------------------- Main ----------------------
 #! Parameters
 input_path = "~/kaggle/jane-street-project/data"
-TRAINING = True    # Flag to determine if the script is in training mode or not
-feature_names = [f"feature_{i:02d}" for i in range(79)]     # Define the feature names based on the number of features (79 in this case)
-num_valid_dates = 100   # Number of validation dates to use
-skip_dates = 500    # Number of dates to skip from the beginning of the dataset
+TRAINING = True    # 是否开启训练模式
+feature_names = [f"feature_{i:02d}" for i in range(79)]     # 记录所有特征的名字，从'feature_00' 到 'feature_79'
+num_valid_dates = 100   # 从数据的最后选取若干帧作为验证集
+skip_dates = 500    # 从数据的开始跳过若干帧，取中间帧作为起始点
 N_fold = 5  # Number of folds for cross-validation
 
-# Dictionary to store different models with their configurations
+# 记录所有使用的模型，以及每一个模型所采取的不同配置
 model_dict = {
     'lgb': lgb.LGBMRegressor(n_estimators=500, device='gpu', gpu_use_dp=True, objective='l2'),
     'xgb': xgb.XGBRegressor(n_estimators=2000, learning_rate=0.1, max_depth=6, tree_method='hist', device="cuda", objective='reg:squarederror', eval_metric=r2_xgb, disable_default_eval_metric=True),
@@ -208,19 +208,22 @@ if TRAINING:
     
     # 划分训练集和验证集
     print("----------- Start to Load Dataset! -----------")
-    dates = df['date_id'].unique()
-    valid_dates = dates[-num_valid_dates:]
-    train_dates = dates[:-num_valid_dates]
-    X_valid = df[feature_names].loc[df['date_id'].isin(valid_dates)]
-    y_valid = df['responder_6'].loc[df['date_id'].isin(valid_dates)]
-    w_valid = df['weight'].loc[df['date_id'].isin(valid_dates)]
+    # 获取唯一日期并划分
+    dates = df['date_id'].unique()  # 获取所有唯一日期
+    valid_dates = dates[-num_valid_dates:]  # 最后 n 个日期作为验证集
+    train_dates = dates[:-num_valid_dates]  # 剩余日期作为训练集
+
+    # 构建验证集，取对应的列，并且 date_id 需要在 valid_dates 当中
+    X_valid = df[feature_names][df['date_id'].isin(valid_dates)]  # 验证集特征
+    y_valid = df['responder_6'][df['date_id'].isin(valid_dates)]  # 验证集标签
+    w_valid = df['weight'][df['date_id'].isin(valid_dates)]      # 验证集权重
     print("----------- Dataset Loaded! -----------")
 
 models = []
 model_ckpt_path = "./jsbaselinezyz/versions/1"
 # Train models for each fold
 for i in tqdm(range(N_fold), desc="Training: ", total=N_fold):
-    train(model_dict, 'lgb', i, model_ckpt_path, TRAINING)
+    train(model_dict, train_dates, 'lgb', i, model_ckpt_path, TRAINING)
     train(model_dict, 'xgb', i, model_ckpt_path, TRAINING)
     train(model_dict, 'cbt', i, model_ckpt_path, TRAINING)
     
