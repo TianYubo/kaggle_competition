@@ -192,11 +192,13 @@ def prepare_datasets(
     Returns:
         训练集和验证集的字典，包含特征(X)、标签(y)和权重(w)
     """
-    # 划分日期
+    # 选择最后 num_valid_dates 个日期作为验证集, 其余作为训练集
+    # 例如，如果 num_valid_dates=10，dates=[0, 1, 2, ..., 99]，则 valid_dates=[90, 91, ..., 99]
     valid_dates = dates[-num_valid_dates:]
     train_dates = dates[:-num_valid_dates]
     
-    # 准备验证集
+    # 准备验证集，只包含 valid_dates 中的数据
+    # X: 特征, y: 标签, w: 权重
     valid_mask = df['date_id'].isin(valid_dates)
     valid_data = {
         'X': df[feature_names][valid_mask],
@@ -204,7 +206,7 @@ def prepare_datasets(
         'w': df['weight'][valid_mask]
     }
     
-    # 准备基础训练集数据
+    # 准备基础训练集数据, 同上
     train_data = {
         'dates': train_dates,
         'X_full': df[feature_names],
@@ -233,14 +235,14 @@ def get_fold_data(
     Returns:
         当前折的训练数据字典
     """
-    # 选择当前折的训练日期
+    # 把 train_dates 分成 n_folds 份，取除了第 fold_idx 份之外的数据作为训练数据
     selected_dates = [date for i, date in enumerate(train_dates) if i % n_folds != fold_idx]
     mask = df['date_id'].isin(selected_dates)
     
     return {
         'X': df[feature_names][mask],
         'y': df['responder_6'][mask],
-        'w': df['weight'][mask]
+        'w': df['weight'][mask],
     }
 
 def train_model(
@@ -298,18 +300,18 @@ def main():
     主函数
     """
     # 配置参数
-    input_path = "/home/kyletian/kaggle/jane-street-project/data"
+    input_path = "data"
     TRAINING = True
     N_fold = 5
     num_valid_dates = 10
     skip_dates = 100
     feature_names = [f"feature_{i:02d}" for i in range(79)]     # 记录所有特征的名字，从'feature_00' 到 'feature_79'
-    models_toUse = ['xgb']
+    models_toUse = ['cbt']
     
     # 记录所有使用的模型，以及每一个模型所采取的不同配置
     model_dict = {
         'lgb': lgb.LGBMRegressor(n_estimators=500, 
-                                 device='gpu', 
+                                 device='cpu',  #! 对于苹果芯片，需要设置为 'cpu'
                                  gpu_use_dp=True, 
                                  objective='l2'),
         # 'xgb': xgb.XGBRegressor(n_estimators=2000, 
@@ -324,19 +326,24 @@ def main():
                                 learning_rate=0.1,
                                 max_depth=10,
                                 tree_method='hist',
-                                device="cuda",
-                                objective='reg:squarederror',
+                                device="cpu",   #! 对于苹果芯片，需要设置为 'cpu'
+                                objective='reg:squarederror',   # 目标：均方误差
                                 eval_metric=r2_xgb,
                                 disable_default_eval_metric=True,
+                                early_stopping_rounds=100,
                                 callbacks=[
-                                    xgb.callback.EvaluationMonitor(show_stdv=False)
+                                    xgb.callback.EvaluationMonitor(show_stdv=False)  # 只显示均值，不显示标准差
                                 ]
                             ),
         'cbt': cbt.CatBoostRegressor(iterations=1000, 
                                      learning_rate=0.05, 
-                                     task_type='GPU', 
-                                     loss_function='RMSE', 
-                                     eval_metric=r2_cbt()),
+                                     task_type='CPU',   #! 对于苹果芯片，需要设置为 'CPU'，而不是 'GPU'
+                                     loss_function='RMSE',
+                                     verbose=True,       # 启用详细日志
+                                     metric_period=1,
+                                     early_stopping_rounds=100,
+                                     eval_metric=r2_cbt(),   # 设置了 eval_metric 之后，只会打印这个指标
+                                    )
     }
     
     if TRAINING:
@@ -369,11 +376,11 @@ def main():
                 trained_model = train_model(model, fold_train_data, valid_data, model_type)
                 models.append(trained_model)
                 
-                # 保存模型
+                # 保存
                 joblib.dump(trained_model, f'./models/{model_type}_{fold_idx}.model')
                 
                 # 清理内存
-                del fold_data
+                # del fold_data
                 gc.collect()
     else:
         # 加载预训练模型
