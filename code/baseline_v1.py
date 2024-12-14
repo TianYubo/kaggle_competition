@@ -7,6 +7,11 @@ import joblib
 import gc
 from tqdm import tqdm
 import numpy as np
+import sys
+import os
+
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# from data.kaggle_evaluation.jane_street_inference_server import *
 
 def r2_xgb(y_true, y_pred, sample_weight):
    """
@@ -306,7 +311,7 @@ def main():
     num_valid_dates = 10
     skip_dates = 100
     feature_names = [f"feature_{i:02d}" for i in range(79)]     # 记录所有特征的名字，从'feature_00' 到 'feature_79'
-    models_toUse = ['cbt']
+    models_toUse = ['cbt', 'lgb', 'xgb']     # 训练的模型类型
     
     # 记录所有使用的模型，以及每一个模型所采取的不同配置
     model_dict = {
@@ -323,7 +328,7 @@ def main():
         #                         eval_metric=r2_xgb, 
         #                         disable_default_eval_metric=True),
         'xgb': xgb.XGBRegressor(n_estimators=2000,
-                                learning_rate=0.1,
+                                learning_rate=0.02,
                                 max_depth=10,
                                 tree_method='hist',
                                 device="cpu",   #! 对于苹果芯片，需要设置为 'cpu'
@@ -348,13 +353,14 @@ def main():
     
     if TRAINING:
         # 加载数据
-        df = pd.read_parquet(
-            f'{input_path}/train.parquet', 
-            filters=[('partition_id', '=', 4)]
-        )
+        df = pd.read_parquet(f'{input_path}/train.parquet')
+        
+        # df = pd.read_parquet(
+        #     f'{input_path}/train.parquet', 
+        #     filters=[('partition_id', '=', 4)]
+        # )
         df = reduce_mem_usage(df, False)
         df = df[df['date_id'] >= skip_dates].reset_index(drop=True)
-        
         
         print("----------- Start to Load Dataset! -----------")
         # 准备数据集
