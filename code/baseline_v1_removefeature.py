@@ -7,6 +7,7 @@ import joblib
 import gc
 from tqdm import tqdm
 import numpy as np
+import polars as pl
 import sys
 import os
 
@@ -300,7 +301,7 @@ def train_model(
         
     return model
 
-def main():
+def train_main():
     """
     主函数
     """
@@ -310,8 +311,25 @@ def main():
     N_fold = 5
     num_valid_dates = 10
     skip_dates = 100
-    feature_names = [f"feature_{i:02d}" for i in range(79)]     # 记录所有特征的名字，从'feature_00' 到 'feature_79'
+    feature_nums = 79
+    all_feature_names = [f"feature_{i:02d}" for i in range(feature_nums)]     # 记录所有特征的名字，从'feature_00' 到 'feature_79'
     models_toUse = ['xgb']     # 训练的模型类型
+    
+    #* 根据 features.csv，计算 correlation matrix, 筛除冗余特征
+    features_tags = pd.read_csv(f"{input_path}/features.csv")
+    correlation_matrix = features_tags[[ f"tag_{no}" for no in range(0,17,1) ] ].T.corr()
+    correlation_threshold = 0.8
+    to_drop = set()
+    fullset = set(range(feature_nums))
+    # 遍历 correlation matrix，把相关性大于阈值的特征加入到 to_drop 中
+    for i in range(feature_nums):
+        for j in range(i+1, feature_nums):
+            if correlation_matrix.iloc[i, j] > correlation_threshold:
+                feature_to_drop = correlation_matrix.columns[j]
+                to_drop.add(feature_to_drop)
+    # 获取剩余特征的名字
+    feature_names = list(fullset - to_drop)
+    feature_names = [all_feature_names[i] for i in feature_names]
     
     # 记录所有使用的模型，以及每一个模型所采取的不同配置
     model_dict = {
@@ -319,14 +337,6 @@ def main():
                                  device='cpu',  #! 对于苹果芯片，需要设置为 'cpu'
                                  gpu_use_dp=True, 
                                  objective='l2'),
-        # 'xgb': xgb.XGBRegressor(n_estimators=2000, 
-        #                         learning_rate=0.1, 
-        #                         max_depth=6, 
-        #                         tree_method='hist', 
-        #                         device="cuda", 
-        #                         objective='reg:squarederror', 
-        #                         eval_metric=r2_xgb, 
-        #                         disable_default_eval_metric=True),
         'xgb': xgb.XGBRegressor(n_estimators=2000,
                                 learning_rate=0.02,
                                 max_depth=10,
@@ -353,12 +363,11 @@ def main():
     
     if TRAINING:
         # 加载数据
-        df = pd.read_parquet(f'{input_path}/train.parquet')
-        
-        # df = pd.read_parquet(
-        #     f'{input_path}/train.parquet', 
-        #     filters=[('partition_id', '=', 4)]
-        # )
+        # df = pd.read_parquet(f'{input_path}/train.parquet')   # 加载全部数据
+        df = pd.read_parquet(
+            f'{input_path}/train.parquet', 
+            filters=[('partition_id', 'in', [4, 5, 6])]     # 只加载 partition_id 为 4, 5, 6 的数据
+        )
         df = reduce_mem_usage(df, False)
         df = df[df['date_id'] >= skip_dates].reset_index(drop=True)
         
@@ -413,9 +422,8 @@ def main():
             for model_type in ['lgb', 'xgb', 'cbt']:
                 model = joblib.load(f'{model_ckpt_path}/{model_type}_{fold_idx}.model')
                 models.append(model)
-    
     return models
 
 if __name__ == "__main__":    
     # 运行主程序
-    models = main()
+    models = train_main()
