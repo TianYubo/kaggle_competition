@@ -23,22 +23,23 @@ import gc
 
 class custom_args():
     def __init__(self):
-        self.usegpu = False
-        self.accelerator = 'mps' if torch.backends.mps.is_available() else 'cpu'
+        self.usegpu = True
+        # self.accelerator = 'mps' if torch.backends.mps.is_available() else 'cpu'
+        self.accelerator = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.gpuid = 0
         self.seed = 42
         self.model = 'nn'
         self.use_wandb = False
         self.project = 'js-xs-nn-with-lags'
         self.dname = "./code/"
-        self.loader_workers = 0
-        self.bs = 4096
+        self.loader_workers = 6
+        self.bs = 8192
         self.lr = 1e-3
         self.weight_decay = 5e-4
         self.dropouts = [0.1, 0.1]
         self.n_hidden = [512, 512, 256]
         self.patience = 25
-        self.max_epochs = 2000
+        self.max_epochs = 100
         self.N_fold = 5
         
 class CustomDataset(Dataset):
@@ -141,7 +142,7 @@ class NN(LightningModule):
         self.log('train_loss', loss, on_step=False, on_epoch=True, batch_size=x.size(0))
         return loss
 
-    def validation_step(self, batch):
+    def validation_step(self, batch, batch_idx):
         x, y, w = batch
         y_hat = self(x)
         loss = F.mse_loss(y_hat, y, reduction='none') * w
@@ -187,7 +188,7 @@ if __name__ == "__main__":
 
     nn_config_args = custom_args()
     # input_path = './kaggle_competition-main/code/' if os.path.exists('./kaggle_competition-main/code/') else '/Users/victoriazhang/kaggle/kaggle_competition-main/code/'
-    input_path = '/Users/kyleee/code/project/kaggle_competition/code/xgboost'
+    input_path = '/home/kyletian/kaggle/jane-street-project/code/xgboost'
     TRAINING = True
     feature_names = ["symbol_id","time_id"] + [f"feature_{i:02d}" for i in range(79)] + [f"responder_{idx}_lag_1" for idx in range(9)]
     label_name = 'responder_6'
@@ -235,7 +236,7 @@ if __name__ == "__main__":
     data_module = DataModule(df, 
                              batch_size=nn_config_args.bs, 
                              valid_df=valid, 
-                             accelerator=nn_config_args.accelerator)
+                             accelerator='cpu')
     
     gc.collect()
     
