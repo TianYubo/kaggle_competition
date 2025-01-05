@@ -13,7 +13,7 @@ import pytorch_lightning
 from pytorch_lightning import (LightningDataModule, LightningModule, Trainer)
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Timer
 from pytorch_lightning.loggers import WandbLogger
-import wandb
+# import wandb
 import pandas as pd
 import numpy as np
 from sklearn.metrics import r2_score
@@ -32,12 +32,13 @@ class custom_args():
         self.use_wandb = False
         self.project = 'js-xs-nn-with-lags'
         self.dname = "./code/"
-        self.loader_workers = 6
-        self.bs = 8192
+        self.loader_workers = 12
+        self.bs = 65536
         self.lr = 1e-3
-        self.weight_decay = 5e-4
+        self.weight_decay = 1e-3
         self.dropouts = [0.1, 0.1]
-        self.n_hidden = [512, 512, 256]
+        # self.n_hidden = [512, 512, 256]
+        self.n_hidden = [512, 1024, 2048, 512, 256]
         self.patience = 25
         self.max_epochs = 100
         self.N_fold = 5
@@ -110,7 +111,7 @@ def r2_val(y_true, y_pred, sample_weight):
     return r2
 
 class NN(LightningModule):
-    def __init__(self, input_dim, hidden_dims, dropouts, lr, weight_decay):
+    def __init__(self, input_dim, hidden_dims, dropouts, lr, weight_decay, log_file="training_log.txt"):
         super().__init__()
         self.save_hyperparameters()
         layers = []
@@ -124,12 +125,13 @@ class NN(LightningModule):
             layers.append(nn.Linear(in_dim, hidden_dim))
             # layers.append(nn.ReLU())
             in_dim = hidden_dim
-        layers.append(nn.Linear(in_dim, 1)) 
+        layers.append(nn.Linear(in_dim, 9)) 
         layers.append(nn.Tanh())
         self.model = nn.Sequential(*layers)
         self.lr = lr
         self.weight_decay = weight_decay
         self.validation_step_outputs = []
+        self.log_file = log_file
 
     def forward(self, x):
         return 5 * self.model(x).squeeze(-1)  
@@ -137,7 +139,7 @@ class NN(LightningModule):
     def training_step(self, batch):
         x, y, w = batch
         y_hat = self(x)
-        loss = F.mse_loss(y_hat, y, reduction='none') * w  #
+        loss = F.mse_loss(y_hat, y, reduction='none') * w.unsqueeze(1)  #
         loss = loss.mean()
         self.log('train_loss', loss, on_step=False, on_epoch=True, batch_size=x.size(0))
         return loss
@@ -145,7 +147,7 @@ class NN(LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y, w = batch
         y_hat = self(x)
-        loss = F.mse_loss(y_hat, y, reduction='none') * w
+        loss = F.mse_loss(y_hat, y, reduction='none') * w.unsqueeze(1)
         loss = loss.mean()
         self.log('val_loss', loss, on_step=False, on_epoch=True, batch_size=x.size(0))
         self.validation_step_outputs.append((y_hat, y, w))
@@ -160,7 +162,8 @@ class NN(LightningModule):
             prob = torch.cat([x[0] for x in self.validation_step_outputs]).cpu().numpy()
             weights = torch.cat([x[2] for x in self.validation_step_outputs]).cpu().numpy()
             # r2_val
-            val_r_square = r2_val(y, prob, weights)
+            # val_r_square = r2_val(y, prob, weights)
+            val_r_square = r2_val(y[:, 6], prob[:, 6], weights)
             self.log("val_r_square", val_r_square, prog_bar=True, on_step=False, on_epoch=True)
         self.validation_step_outputs.clear()
 
@@ -183,15 +186,23 @@ class NN(LightningModule):
         metrics = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in self.trainer.logged_metrics.items()}
         formatted_metrics = {k: f"{v:.5f}" for k, v in metrics.items()}
         print(f"Epoch {epoch}: {formatted_metrics}")
+        
+        log_entry = f"Epoch {epoch}: {formatted_metrics}\n"
+        # print(log_entry)
+        # 写入日志文件
+        with open(self.log_file, "a") as f:
+            f.write(log_entry)
 
 if __name__ == "__main__":
 
     nn_config_args = custom_args()
     # input_path = './kaggle_competition-main/code/' if os.path.exists('./kaggle_competition-main/code/') else '/Users/victoriazhang/kaggle/kaggle_competition-main/code/'
-    input_path = '/home/kyletian/kaggle/jane-street-project/code/xgboost'
+    # input_path = '/mnt/kaggle/kaggle_competition/data/processed_dataset'
+    input_path = '/mnt/kaggle/kaggle_competition/code/xgboost'
     TRAINING = True
     feature_names = ["symbol_id","time_id"] + [f"feature_{i:02d}" for i in range(79)] + [f"responder_{idx}_lag_1" for idx in range(9)]
-    label_name = 'responder_6'
+    # label_name = 'responder_6'
+    label_name = [f"responder_{idx}" for idx in range(9)]
     weight_name = 'weight'
 
     # train_name = os.path.join("./code/", "nn_input_df_with_lags.pickle")
@@ -248,9 +259,10 @@ if __name__ == "__main__":
                     lr=nn_config_args.lr, 
                     weight_decay=nn_config_args.weight_decay)
         early_stopping = EarlyStopping('val_loss', patience=nn_config_args.patience, mode='min')
-        checkpoint = ModelCheckpoint(monitor='val_loss', 
+        checkpoint = ModelCheckpoint(dirpath='/mnt/kaggle/kaggle_competition/code/NN/nn_ckpt/250104',
+                                     monitor='val_loss', 
                                      mode='min',
-                                     save_top_k=1)
+                                     save_top_k=4)
         trainer = Trainer(max_epochs=nn_config_args.max_epochs, 
                           accelerator=nn_config_args.accelerator,
                           logger=None, 
